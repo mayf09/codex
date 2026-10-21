@@ -139,6 +139,20 @@ use tracing::warn;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
+const OVERFLOW_RECOVERY_NOTE: &str = "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.";
+
+fn overflow_recovery_note() -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_owned(),
+        content: vec![ContentItem::InputText {
+            text: OVERFLOW_RECOVERY_NOTE.to_owned(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 /// Explicit MCP startup requirements retained across restarts within one user turn.
 #[derive(Default)]
 pub(crate) struct McpStartupRequirements {
@@ -350,6 +364,7 @@ pub(crate) async fn run_turn(
             &mut client_session,
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
+            /*strip_media*/ false,
         )
         .await?;
         sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref())
@@ -421,6 +436,7 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
+    let mut context_window_compacted = false;
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -535,6 +551,7 @@ pub(crate) async fn run_turn(
                 Arc::clone(&turn_diff_tracker),
                 &mut client_session,
                 sampling_request_input,
+                context_window_compacted,
                 cancellation_token.child_token(),
             )
             .await
@@ -542,7 +559,18 @@ pub(crate) async fn run_turn(
         .await;
         match sampling_request_result {
             Ok((sampling_request_output, sampling_request_input)) => {
+                let recovered_from_overflow = context_window_compacted;
                 guardian_budget_compacted = false;
+                context_window_compacted = false;
+                if recovered_from_overflow {
+                    sess.strip_media_from_history().await;
+                    sess.record_conversation_items(
+                        turn_context.as_ref(),
+                        &step_context.settings.model_info,
+                        &[overflow_recovery_note()],
+                    )
+                    .await;
+                }
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
@@ -625,6 +653,7 @@ pub(crate) async fn run_turn(
                         &mut client_session,
                         CompactionReason::ContextLimit,
                         CompactionPhase::MidTurn,
+                        /*strip_media*/ false,
                     )
                     .await
                     {
@@ -733,6 +762,7 @@ pub(crate) async fn run_turn(
                             &mut client_session,
                             CompactionReason::ContextLimit,
                             CompactionPhase::PostTurn,
+                            /*strip_media*/ false,
                         )
                         .await
                     {
@@ -783,6 +813,26 @@ pub(crate) async fn run_turn(
                     &mut client_session,
                     CompactionReason::ContextLimit,
                     CompactionPhase::MidTurn,
+                    /*strip_media*/ false,
+                )
+                .await?;
+                can_drain_pending_input = false;
+                continue;
+            }
+            Err(err)
+                if matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
+                    && !context_window_compacted
+                    && !turn_context.config.features.enabled(Feature::TokenBudget) =>
+            {
+                context_window_compacted = true;
+                run_auto_compact(
+                    &sess,
+                    Arc::clone(&step_context),
+                    Arc::clone(&step_context),
+                    &mut client_session,
+                    CompactionReason::ContextLimit,
+                    CompactionPhase::MidTurn,
+                    /*strip_media*/ true,
                 )
                 .await?;
                 can_drain_pending_input = false;
@@ -1324,6 +1374,7 @@ async fn run_pre_sampling_compact(
             client_session,
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
+            /*strip_media*/ false,
         )
         .await?;
     }
@@ -1420,6 +1471,7 @@ async fn maybe_run_previous_model_inline_compact(
         client_session,
         reason,
         CompactionPhase::PreTurn,
+        /*strip_media*/ false,
     )
     .await?;
     Ok(())
@@ -1438,6 +1490,7 @@ async fn run_auto_compact(
     client_session: &mut ModelClientSession,
     reason: CompactionReason,
     phase: CompactionPhase,
+    strip_media: bool,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     if matches!(phase, CompactionPhase::PreTurn)
@@ -1484,6 +1537,7 @@ async fn run_auto_compact(
                 world_state,
                 reason,
                 phase,
+                strip_media,
             )
             .await?;
         }
@@ -1607,6 +1661,7 @@ async fn run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
     input: Vec<ResponseItem>,
+    strip_media: bool,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1656,6 +1711,9 @@ async fn run_sampling_request(
             sess.current_window_uses_incremental_tools(&step_context)
                 .await,
         );
+        if strip_media {
+            crate::image_preparation::strip_inline_images(&mut prompt.input);
+        }
         let responses_metadata = sess
             .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
             .await;

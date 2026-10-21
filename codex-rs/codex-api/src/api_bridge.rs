@@ -60,6 +60,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
         ApiError::ContentFilter => CodexErr::new(CodexErrorDetails::ContentFilter),
         ApiError::ServerOverloaded { .. } => CodexErr::ServerOverloaded,
         ApiError::FlexUnavailable => CodexErr::new(CodexErrorDetails::FlexUnavailable),
+        ApiError::Api { status, .. } if status == http::StatusCode::PAYLOAD_TOO_LARGE => {
+            CodexErr::ContextWindowExceeded
+        }
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
             CodexErr::UnexpectedStatus(UnexpectedResponseError {
@@ -96,6 +99,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
                 body,
                 ..
             } => {
+                if status == http::StatusCode::PAYLOAD_TOO_LARGE {
+                    return CodexErr::ContextWindowExceeded;
+                }
                 let body_text = body.unwrap_or_default();
 
                 if status == http::StatusCode::SERVICE_UNAVAILABLE

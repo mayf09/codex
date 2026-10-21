@@ -12083,6 +12083,7 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
         ),
         CompactionReason::ModelDownshift,
         CompactionPhase::PreTurn,
+        /*strip_media*/ false,
     )
     .await
     .expect("compaction succeeds");

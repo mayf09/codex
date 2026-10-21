@@ -29,6 +29,22 @@ pub const MAX_DIMENSION: u32 = 2048;
 /// This is a high sanity guard against pathological inputs, not a protocol
 /// requirement or target upload size.
 pub const MAX_PROMPT_IMAGE_INPUT_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Maximum base64 payload we are willing to send for a single prompt image.
+///
+/// Images are re-encoded (JPEG quality ladder, then downscaling) until their
+/// base64 representation fits under this budget. If the image cannot be shrunk
+/// enough, it is replaced with a text placeholder rather than sent inline,
+/// which keeps a single large image (or a few historical images) from blowing
+/// past gateway request-body limits.
+pub const MAX_PROMPT_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
+
+/// Raw encoded byte budget corresponding to [`MAX_PROMPT_IMAGE_BASE64_BYTES`].
+///
+/// base64 inflates binary data by 4/3, so the raw cap is the base64 cap scaled
+/// down accordingly.
+const MAX_PROMPT_IMAGE_ENCODED_BYTES: usize = MAX_PROMPT_IMAGE_BASE64_BYTES / 4 * 3;
+
 const MAX_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 pub mod error;
@@ -83,6 +99,7 @@ impl PromptImageMode {
     });
 }
 
+#[derive(Clone)]
 struct ImageMetadata {
     icc_profile: Option<Vec<u8>>,
     exif: Option<Vec<u8>>,
@@ -178,22 +195,23 @@ fn load_for_prompt_bytes_uncached(
             PromptImageMode::ResizeToFit | PromptImageMode::Original => None,
         };
 
-        let encoded = if let Some((prepared_width, prepared_height, resized)) = target_dimensions {
+        let encoded = if let Some((.., resized)) = target_dimensions {
             let target_format = format
                 .filter(|format| can_preserve_source_bytes(*format))
                 .unwrap_or(ImageFormat::Png);
-            let (bytes, output_format) = encode_image(&resized, target_format, metadata)?;
+            let (bytes, output_format, final_width, final_height) =
+                encode_within_budget(&resized, target_format, &metadata)?;
             let mime = format_to_mime(output_format);
             EncodedImage {
                 bytes: bytes.into(),
                 mime,
                 source_width: width,
                 source_height: height,
-                width: prepared_width,
-                height: prepared_height,
+                width: final_width,
+                height: final_height,
             }
-        } else {
-            if let Some(format) = format.filter(|format| can_preserve_source_bytes(*format)) {
+        } else if let Some(format) = format.filter(|format| can_preserve_source_bytes(*format)) {
+            if file_bytes.len() <= MAX_PROMPT_IMAGE_ENCODED_BYTES {
                 let mime = format_to_mime(format);
                 EncodedImage {
                     bytes: file_bytes.into(),
@@ -204,16 +222,29 @@ fn load_for_prompt_bytes_uncached(
                     height,
                 }
             } else {
-                let (bytes, output_format) = encode_image(&dynamic, ImageFormat::Png, metadata)?;
+                let (bytes, output_format, final_width, final_height) =
+                    encode_within_budget(&dynamic, format, &metadata)?;
                 let mime = format_to_mime(output_format);
                 EncodedImage {
                     bytes: bytes.into(),
                     mime,
                     source_width: width,
                     source_height: height,
-                    width,
-                    height,
+                    width: final_width,
+                    height: final_height,
                 }
+            }
+        } else {
+            let (bytes, output_format, final_width, final_height) =
+                encode_within_budget(&dynamic, ImageFormat::Png, &metadata)?;
+            let mime = format_to_mime(output_format);
+            EncodedImage {
+                bytes: bytes.into(),
+                mime,
+                source_width: width,
+                source_height: height,
+                width: final_width,
+                height: final_height,
             }
         };
 
@@ -363,7 +394,7 @@ fn can_preserve_source_bytes(format: ImageFormat) -> bool {
 fn encode_image(
     image: &DynamicImage,
     preferred_format: ImageFormat,
-    metadata: ImageMetadata,
+    metadata: &ImageMetadata,
 ) -> Result<(Vec<u8>, ImageFormat), ImageProcessingError> {
     let target_format = match preferred_format {
         ImageFormat::Jpeg => ImageFormat::Jpeg,
@@ -372,7 +403,8 @@ fn encode_image(
     };
 
     let mut buffer = Vec::new();
-    let ImageMetadata { icc_profile, exif } = metadata;
+    let icc_profile = metadata.icc_profile.clone();
+    let exif = metadata.exif.clone();
 
     match target_format {
         ImageFormat::Png => {
@@ -421,6 +453,74 @@ fn encode_image(
     }
 
     Ok((buffer, target_format))
+}
+
+fn encode_jpeg_with_quality(
+    image: &DynamicImage,
+    quality: u8,
+    metadata: &ImageMetadata,
+) -> Result<Vec<u8>, ImageProcessingError> {
+    let mut buffer = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut buffer, quality);
+    apply_image_metadata(
+        &mut encoder,
+        metadata.icc_profile.clone(),
+        metadata.exif.clone(),
+        ImageFormat::Jpeg,
+    )?;
+    encoder
+        .encode_image(image)
+        .map_err(|source| ImageProcessingError::Encode {
+            format: ImageFormat::Jpeg,
+            source,
+        })?;
+    Ok(buffer)
+}
+
+fn encode_within_budget(
+    image: &DynamicImage,
+    preferred_format: ImageFormat,
+    metadata: &ImageMetadata,
+) -> Result<(Vec<u8>, ImageFormat, u32, u32), ImageProcessingError> {
+    let (bytes, format) = encode_image(image, preferred_format, metadata)?;
+    if bytes.len() <= MAX_PROMPT_IMAGE_ENCODED_BYTES {
+        return Ok((bytes, format, image.width(), image.height()));
+    }
+
+    let mut last_size = bytes.len();
+    for quality in [85u8, 80, 70, 55, 40] {
+        let bytes = encode_jpeg_with_quality(image, quality, metadata)?;
+        last_size = bytes.len();
+        if bytes.len() <= MAX_PROMPT_IMAGE_ENCODED_BYTES {
+            return Ok((bytes, ImageFormat::Jpeg, image.width(), image.height()));
+        }
+    }
+
+    let mut current = image.clone();
+    for _ in 0..4 {
+        let (width, height) = current.dimensions();
+        if width <= 64 || height <= 64 {
+            break;
+        }
+        current = current.resize(
+            (width * 3 / 4).max(1),
+            (height * 3 / 4).max(1),
+            FilterType::Triangle,
+        );
+        for quality in [80u8, 60, 40] {
+            let bytes = encode_jpeg_with_quality(&current, quality, metadata)?;
+            last_size = bytes.len();
+            if bytes.len() <= MAX_PROMPT_IMAGE_ENCODED_BYTES {
+                return Ok((bytes, ImageFormat::Jpeg, current.width(), current.height()));
+            }
+        }
+    }
+
+    Err(ImageProcessingError::ImageTooLarge {
+        representation: "encoded image",
+        size: last_size,
+        max: MAX_PROMPT_IMAGE_ENCODED_BYTES,
+    })
 }
 
 fn apply_image_metadata(

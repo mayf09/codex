@@ -84,6 +84,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     world_state: Arc<WorldState>,
     reason: CompactionReason,
     phase: CompactionPhase,
+    strip_media: bool,
 ) -> CodexResult<()> {
     let compaction_metadata = CompactionTurnMetadata::new(
         CompactionTrigger::Auto,
@@ -98,6 +99,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         Some(client_session),
         world_state,
         compaction_metadata,
+        strip_media,
     )
     .await
 }
@@ -120,6 +122,7 @@ pub(crate) async fn run_remote_compact_task(
         /*client_session*/ None,
         world_state,
         compaction_metadata,
+        /*strip_media*/ false,
     )
     .await
 }
@@ -131,6 +134,7 @@ async fn run_remote_compact_task_inner(
     client_session: Option<&mut ModelClientSession>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
+    strip_media: bool,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let trigger = compaction_metadata.trigger();
@@ -173,6 +177,7 @@ async fn run_remote_compact_task_inner(
         client_session,
         world_state,
         compaction_metadata,
+        strip_media,
         &mut analytics_details,
     )
     .await;
@@ -219,6 +224,7 @@ async fn run_remote_compact_task_inner_impl(
     mut client_session: Option<&mut ModelClientSession>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
+    strip_media: bool,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
@@ -285,13 +291,16 @@ async fn run_remote_compact_task_inner_impl(
     let RemoteCompactV2Attempt {
         input_goal_ids,
         trace_input_history,
-        prompt_input,
+        mut prompt_input,
         prompt_input_metadata,
         compaction_output,
         compaction_response_id,
         token_usage,
         owned_client_session: _owned_client_session,
     } = attempt;
+    if strip_media {
+        crate::image_preparation::strip_inline_images(&mut prompt_input);
+    }
     if let Some(token_usage) = token_usage {
         sess.record_rollout_budget_usage(&token_usage).await?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
@@ -381,6 +390,8 @@ async fn run_remote_compaction_request_v2(
     responses_metadata: &CodexResponsesMetadata,
 ) -> CodexResult<RemoteCompactionV2Output> {
     let turn_context = &step_context.turn;
+    let mut compaction_prompt = prompt.clone();
+    crate::image_preparation::strip_inline_images(&mut compaction_prompt.input);
     let max_retries = turn_context
         .provider
         .info()
@@ -390,7 +401,7 @@ async fn run_remote_compaction_request_v2(
     loop {
         let result = match client_session
             .stream(
-                prompt,
+                &compaction_prompt,
                 turn_context.model_info(),
                 &turn_context.session_telemetry,
                 sess.reasoning_effort_for_request(

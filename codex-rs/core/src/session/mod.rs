@@ -4500,6 +4500,11 @@ impl Session {
         state.clone_history()
     }
 
+    pub(crate) async fn strip_media_from_history(&self) {
+        let mut state = self.state.lock().await;
+        state.strip_media_from_history();
+    }
+
     /// Captures the history lifetime without exposing mutable session state.
     pub(crate) async fn history_reset(&self) -> (u64, CancellationToken) {
         let state = self.state.lock().await;

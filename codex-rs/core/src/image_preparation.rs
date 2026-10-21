@@ -119,6 +119,39 @@ impl ImagePreparationError {
     }
 }
 
+pub(crate) const COMPACTED_IMAGE_PLACEHOLDER: &str =
+    "image content omitted during compaction to keep the request under the provider size limit";
+
+/// Replaces inline images with text placeholders in a request copy (never persisted history).
+pub(crate) fn strip_inline_images(items: &mut [ResponseItem]) {
+    for item in items {
+        match item {
+            ResponseItem::Message { content, .. } => {
+                for part in content.iter_mut() {
+                    if matches!(part, ContentItem::InputImage { .. }) {
+                        *part = ContentItem::InputText {
+                            text: COMPACTED_IMAGE_PLACEHOLDER.to_string(),
+                        };
+                    }
+                }
+            }
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => {
+                if let Some(content) = output.content_items_mut() {
+                    for part in content.iter_mut() {
+                        if matches!(part, FunctionCallOutputContentItem::InputImage { .. }) {
+                            *part = FunctionCallOutputContentItem::InputText {
+                                text: COMPACTED_IMAGE_PLACEHOLDER.to_string(),
+                            };
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) async fn prepare_response_items(
     thread_id: &str,
     ephemeral: bool,

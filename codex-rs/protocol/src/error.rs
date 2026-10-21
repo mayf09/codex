@@ -110,7 +110,7 @@ pub enum CodexErrorDetails {
     RateLimitExceeded(String),
     // The iOS input-limit classifier matches this message's ASCII prefix.
     #[error(
-        "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
+        "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying. If the conversation contains many images or large attachments, remove some and retry."
     )]
     ContextWindowExceeded,
     #[error("no thread with id: {0}")]

@@ -170,6 +170,16 @@ impl SessionState {
         self.history.clone()
     }
 
+    pub(crate) fn strip_media_from_history(&mut self) {
+        let mut items = self.history.clone().into_annotated_items();
+        for envelope in &mut items {
+            crate::image_preparation::strip_inline_images(std::slice::from_mut(
+                &mut envelope.item,
+            ));
+        }
+        self.history.replace_annotated(items);
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_history(
         &mut self,

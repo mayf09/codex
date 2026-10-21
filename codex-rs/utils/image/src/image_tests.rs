@@ -378,3 +378,38 @@ async fn bounds_cache_by_encoded_byte_size() {
     assert!(cache.get(&key(2)).is_some());
     assert!(cache.get(&key(3)).is_none());
 }
+
+#[test]
+fn caps_encoded_image_at_base64_budget() {
+    IMAGE_CACHE.clear();
+
+    let mut image = ImageBuffer::new(2000u32, 1500u32);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let noise = (x.wrapping_mul(31) ^ y.wrapping_mul(131)).wrapping_mul(2_654_435_761);
+        *pixel = Rgba([
+            (noise >> 24) as u8,
+            (noise >> 16) as u8,
+            (noise >> 8) as u8,
+            255,
+        ]);
+    }
+    let bytes = image_bytes(&image, ImageFormat::Png);
+    assert!(
+        bytes.len() > MAX_PROMPT_IMAGE_ENCODED_BYTES,
+        "fixture PNG ({} bytes) must exceed the encoded budget",
+        bytes.len()
+    );
+
+    let encoded = load_for_prompt_bytes(
+        Path::new("oversized.png"),
+        bytes,
+        PromptImageMode::ResizeToFit,
+    )
+    .expect("oversized image should be shrunk, not rejected");
+
+    let base64_len = BASE64_STANDARD.encode(&encoded.bytes).len();
+    assert!(
+        base64_len <= MAX_PROMPT_IMAGE_BASE64_BYTES,
+        "base64 payload {base64_len} exceeds budget {MAX_PROMPT_IMAGE_BASE64_BYTES}"
+    );
+}

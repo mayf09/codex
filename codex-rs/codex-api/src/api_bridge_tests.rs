@@ -12,6 +12,18 @@ fn map_api_error_maps_server_overloaded() {
 }
 
 #[test]
+fn map_api_error_maps_payload_too_large_to_context_window_exceeded() {
+    let err = map_api_error(ApiError::Api {
+        status: http::StatusCode::PAYLOAD_TOO_LARGE,
+        message: "Request body too large".to_string(),
+    });
+    assert!(matches!(
+        err.details(),
+        CodexErrorDetails::ContextWindowExceeded
+    ));
+}
+
+#[test]
 fn map_api_error_preserves_content_filter_retry_and_public_error() {
     let err = map_api_error(ApiError::ContentFilter);
     assert!(matches!(err.details(), CodexErrorDetails::ContentFilter));
