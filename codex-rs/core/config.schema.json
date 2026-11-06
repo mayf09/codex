@@ -7694,6 +7694,12 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "model_prompt_image_total_bytes": {
+      "description": "Maximum total bytes of inline base64 image data retained in a single model request. Older images are replaced with text placeholders until the request fits. Defaults to 24 MiB; set to `0` to disable the budget.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "model_provider": {
       "description": "Provider to use from the model_providers map.",
       "type": "string"
@@ -7711,6 +7717,12 @@
     },
     "model_reasoning_summary": {
       "$ref": "#/definitions/ReasoningSummary"
+    },
+    "model_request_body_max_bytes": {
+      "description": "Maximum serialized request body bytes. Older images, large tool outputs, and older message text are shed until the request fits. Defaults to 40 MiB; `0` disables the budget.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
     },
     "model_verbosity": {
       "allOf": [

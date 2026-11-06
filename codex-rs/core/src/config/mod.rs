@@ -225,6 +225,8 @@ pub use windows_sandbox_config::windows_mxc_allowed_by_config;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
+const DEFAULT_PROMPT_IMAGE_TOTAL_BYTES: usize = 24 * 1024 * 1024;
+const DEFAULT_REQUEST_BODY_MAX_BYTES: usize = 40 * 1024 * 1024;
 
 /// Signals that a public config selected the retired `untrusted` approval policy.
 #[derive(Debug, thiserror::Error)]
@@ -1031,6 +1033,13 @@ pub struct Config {
 
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
     pub model_verbosity: Option<Verbosity>,
+
+    /// Maximum total bytes of inline base64 image data retained in a single request.
+    /// `0` disables the budget.
+    pub model_prompt_image_total_bytes: usize,
+
+    /// Maximum serialized request body bytes. `0` disables the budget.
+    pub model_request_body_max_bytes: usize,
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
@@ -4450,6 +4459,12 @@ impl Config {
             model_reasoning_summary: cfg.model_reasoning_summary,
             model_catalog,
             model_verbosity: cfg.model_verbosity,
+            model_prompt_image_total_bytes: cfg
+                .model_prompt_image_total_bytes
+                .unwrap_or(DEFAULT_PROMPT_IMAGE_TOTAL_BYTES),
+            model_request_body_max_bytes: cfg
+                .model_request_body_max_bytes
+                .unwrap_or(DEFAULT_REQUEST_BODY_MAX_BYTES),
             chatgpt_base_url: cfg
                 .chatgpt_base_url
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),

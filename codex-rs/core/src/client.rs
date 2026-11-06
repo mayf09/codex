@@ -276,6 +276,11 @@ pub struct ModelClient {
     executed_tool_calls: Option<ExecutedToolCalls>,
     // Resolved once when the session is created, like other session feature flags.
     api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
+    /// Maximum total bytes of inline base64 image data retained in a single request.
+    /// `0` disables the budget.
+    prompt_image_total_bytes: usize,
+    /// Maximum serialized request body bytes. `0` disables the budget.
+    request_body_max_bytes: usize,
 }
 
 /// A turn-scoped streaming session created from a [`ModelClient`].
@@ -545,7 +550,19 @@ impl ModelClient {
             executed_tool_calls: None,
             api_key_cyber_access_programs:
                 cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
+            prompt_image_total_bytes: 0,
+            request_body_max_bytes: 0,
         }
+    }
+
+    pub(crate) fn with_prompt_image_total_bytes(mut self, max_bytes: usize) -> Self {
+        self.prompt_image_total_bytes = max_bytes;
+        self
+    }
+
+    pub(crate) fn with_request_body_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.request_body_max_bytes = max_bytes;
+        self
     }
 
     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
@@ -904,6 +921,12 @@ impl ModelClient {
             // Filter only the request copy; persisted history remains unchanged.
             input.retain(|item| !matches!(item, ResponseItem::ConfigurationUpdate { .. }));
         }
+        if self.prompt_image_total_bytes > 0 {
+            crate::image_preparation::enforce_total_inline_image_budget(
+                &mut input,
+                self.prompt_image_total_bytes,
+            );
+        }
         let is_openai = self.state.provider.info().is_openai();
         // These prompt-only items are rebuilt on every request. Hash their visible payloads
         // within the thread so retries and resumed sessions preserve their identity.
@@ -993,7 +1016,7 @@ impl ModelClient {
             }
         }
         let client_metadata = responses_metadata.client_metadata(include_internal);
-        let request = ResponsesApiRequest {
+        let mut request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             input,
             tools,
@@ -1010,6 +1033,12 @@ impl ModelClient {
             client_metadata: Some(client_metadata),
             access_programs: None,
         };
+        if self.request_body_max_bytes > 0 {
+            crate::request_budget::enforce_request_body_budget(
+                &mut request,
+                self.request_body_max_bytes,
+            );
+        }
         Ok(request)
     }
 

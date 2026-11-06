@@ -1786,6 +1786,8 @@ impl Session {
                     extensions.model_request_contributors().to_vec(),
                 )
                 .with_executed_tool_calls(executed_tool_calls.clone())
+                .with_prompt_image_total_bytes(config.model_prompt_image_total_bytes)
+                .with_request_body_max_bytes(config.model_request_body_max_bytes)
                 .with_restored_history(matches!(
                     &initial_history,
                     InitialHistory::Resumed(_) | InitialHistory::Forked(_)

@@ -645,3 +645,97 @@ fn preparation_errors_use_bounded_actionable_placeholders() {
         assert_eq!(error.placeholder(), expected);
     }
 }
+
+fn inline_image_message(image_url: String) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image: ImageReference::Inline { image_url },
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn message_has_inline_image(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Message { content, .. }
+            if content.iter().any(|part| matches!(part, ContentItem::InputImage { .. }))
+    )
+}
+
+fn message_has_budget_placeholder(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Message { content, .. }
+            if content.iter().any(|part| matches!(
+                part,
+                ContentItem::InputText { text } if text == IMAGE_BUDGET_PLACEHOLDER
+            ))
+    )
+}
+
+#[test]
+fn inline_image_budget_evicts_oldest_and_keeps_newest() {
+    let mut items = vec![
+        inline_image_message("a".repeat(100)),
+        inline_image_message("b".repeat(100)),
+        inline_image_message("c".repeat(100)),
+    ];
+    enforce_total_inline_image_budget(&mut items, 250);
+    assert!(message_has_budget_placeholder(&items[0]));
+    assert!(message_has_inline_image(&items[1]));
+    assert!(message_has_inline_image(&items[2]));
+}
+
+#[test]
+fn inline_image_budget_keeps_newest_even_over_budget() {
+    let mut items = vec![inline_image_message("a".repeat(100))];
+    enforce_total_inline_image_budget(&mut items, 10);
+    assert!(message_has_inline_image(&items[0]));
+}
+
+#[test]
+fn inline_image_budget_zero_is_noop() {
+    let mut items = vec![
+        inline_image_message("a".repeat(100)),
+        inline_image_message("b".repeat(100)),
+    ];
+    enforce_total_inline_image_budget(&mut items, 0);
+    assert!(message_has_inline_image(&items[0]));
+    assert!(message_has_inline_image(&items[1]));
+}
+
+#[test]
+fn inline_image_budget_counts_tool_output_images() {
+    let mut items = vec![
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-image".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_content_items(vec![
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::Inline {
+                        image_url: "t".repeat(100),
+                    },
+                    detail: None,
+                },
+            ]),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        inline_image_message("u".repeat(100)),
+    ];
+    enforce_total_inline_image_budget(&mut items, 150);
+    let ResponseItem::FunctionCallOutput { output, .. } = &items[0] else {
+        panic!("expected tool output");
+    };
+    assert!(matches!(
+        output.content_items(),
+        Some([FunctionCallOutputContentItem::InputText { text }]) if text == IMAGE_BUDGET_PLACEHOLDER
+    ));
+    assert!(message_has_inline_image(&items[1]));
+}

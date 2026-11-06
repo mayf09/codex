@@ -339,6 +339,15 @@ pub struct ConfigToml {
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
 
+    /// Maximum total bytes of inline base64 image data retained in a single model request.
+    /// Older images are replaced with text placeholders until the request fits.
+    /// Defaults to 24 MiB; set to `0` to disable the budget.
+    pub model_prompt_image_total_bytes: Option<usize>,
+
+    /// Maximum serialized request body bytes. Older images, large tool outputs, and older
+    /// message text are shed until the request fits. Defaults to 40 MiB; `0` disables the budget.
+    pub model_request_body_max_bytes: Option<usize>,
+
     /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
     /// Default: `300000` (5 minutes).
     pub background_terminal_max_timeout: Option<u64>,

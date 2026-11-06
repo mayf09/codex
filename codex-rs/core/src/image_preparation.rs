@@ -152,6 +152,118 @@ pub(crate) fn strip_inline_images(items: &mut [ResponseItem]) {
     }
 }
 
+pub(crate) const IMAGE_BUDGET_PLACEHOLDER: &str =
+    "image content omitted to keep the request under the configured image byte budget";
+
+/// Replaces the oldest inline images with placeholders until the total inline image payload fits
+/// `max_bytes`, always keeping the newest image. Only the request copy is mutated.
+pub(crate) fn enforce_total_inline_image_budget(items: &mut [ResponseItem], max_bytes: usize) {
+    if max_bytes == 0 {
+        return;
+    }
+
+    let (mut total, slots) = collect_inline_image_slots(items);
+    if total <= max_bytes || slots.len() <= 1 {
+        return;
+    }
+
+    let newest = slots.len() - 1;
+    for (slot_idx, (item_idx, part_idx, is_tool)) in slots.into_iter().enumerate() {
+        if total <= max_bytes || slot_idx == newest {
+            break;
+        }
+        let removed = if is_tool {
+            let Some(content) = tool_output_content_mut(&mut items[item_idx]) else {
+                continue;
+            };
+            let replaced = std::mem::replace(
+                &mut content[part_idx],
+                FunctionCallOutputContentItem::InputText {
+                    text: IMAGE_BUDGET_PLACEHOLDER.to_string(),
+                },
+            );
+            match replaced {
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                } => image_url.len(),
+                _ => 0,
+            }
+        } else {
+            let ResponseItem::Message { content, .. } = &mut items[item_idx] else {
+                continue;
+            };
+            let replaced = std::mem::replace(
+                &mut content[part_idx],
+                ContentItem::InputText {
+                    text: IMAGE_BUDGET_PLACEHOLDER.to_string(),
+                },
+            );
+            match replaced {
+                ContentItem::InputImage {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                } => image_url.len(),
+                _ => 0,
+            }
+        };
+        total = total.saturating_sub(removed);
+    }
+}
+
+pub(crate) fn total_inline_image_bytes(items: &[ResponseItem]) -> usize {
+    collect_inline_image_slots(items).0
+}
+
+fn collect_inline_image_slots(items: &[ResponseItem]) -> (usize, Vec<(usize, usize, bool)>) {
+    let mut slots = Vec::new();
+    let mut total = 0usize;
+    for (item_idx, item) in items.iter().enumerate() {
+        match item {
+            ResponseItem::Message { content, .. } => {
+                for (part_idx, part) in content.iter().enumerate() {
+                    if let ContentItem::InputImage {
+                        image: ImageReference::Inline { image_url },
+                        ..
+                    } = part
+                    {
+                        total = total.saturating_add(image_url.len());
+                        slots.push((item_idx, part_idx, false));
+                    }
+                }
+            }
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => {
+                let Some(content) = output.content_items() else {
+                    continue;
+                };
+                for (part_idx, part) in content.iter().enumerate() {
+                    if let FunctionCallOutputContentItem::InputImage {
+                        image: ImageReference::Inline { image_url },
+                        ..
+                    } = part
+                    {
+                        total = total.saturating_add(image_url.len());
+                        slots.push((item_idx, part_idx, true));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (total, slots)
+}
+
+fn tool_output_content_mut(
+    item: &mut ResponseItem,
+) -> Option<&mut Vec<FunctionCallOutputContentItem>> {
+    match item {
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => output.content_items_mut(),
+        _ => None,
+    }
+}
+
 pub(crate) async fn prepare_response_items(
     thread_id: &str,
     ephemeral: bool,

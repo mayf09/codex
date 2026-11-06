@@ -45,7 +45,12 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
     };
 
     match error.code.as_deref() {
-        Some("context_length_exceeded") => ApiError::ContextWindowExceeded,
+        Some(
+            "context_length_exceeded"
+            | "payload_too_large"
+            | "request_too_large"
+            | "input_too_large",
+        ) => ApiError::ContextWindowExceeded,
         Some(
             "insufficient_quota"
             | "credit_balance_exhausted"

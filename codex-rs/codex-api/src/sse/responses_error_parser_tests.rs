@@ -45,3 +45,20 @@ fn test_try_parse_retry_delay_azure() {
     let delay = try_parse_retry_delay(&err);
     assert_eq!(delay, Some(Duration::from_secs(35)));
 }
+
+#[test]
+fn oversized_request_codes_are_context_overflow() {
+    for code in ["payload_too_large", "request_too_large", "input_too_large"] {
+        let response = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": code,
+                "message": "request too large",
+            }
+        });
+        assert!(matches!(
+            parse_failed_response(Some(response)),
+            ApiError::ContextWindowExceeded
+        ));
+    }
+}
